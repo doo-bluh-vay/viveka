@@ -1,0 +1,112 @@
+[
+    {
+        "year": 2005,
+        "inflation": 5.5700,
+        "gdp": 7.9234
+    },
+    {
+        "year": 2006,
+        "inflation": 6.5300,
+        "gdp": 8.0607
+    },
+    {
+        "year": 2007,
+        "inflation": 5.5100,
+        "gdp": 7.6608
+    },
+    {
+        "year": 2008,
+        "inflation": 9.7000,
+        "gdp": 3.0867
+    },
+    {
+        "year": 2009,
+        "inflation": 14.9700,
+        "gdp": 7.8619
+    },
+    {
+        "year": 2010,
+        "inflation": 9.4700,
+        "gdp": 8.4976
+    },
+    {
+        "year": 2011,
+        "inflation": 6.4900,
+        "gdp": 5.2413
+    },
+    {
+        "year": 2012,
+        "inflation": 11.1700,
+        "gdp": 5.4564
+    },
+    {
+        "year": 2013,
+        "inflation": 9.1300,
+        "gdp": 6.3861
+    },
+    {
+        "year": 2014,
+        "inflation": 5.8600,
+        "gdp": 7.4102
+    },
+    {
+        "year": 2015,
+        "inflation": 6.3200,
+        "gdp": 7.9963
+    },
+    {
+        "year": 2016,
+        "inflation": 2.2300,
+        "gdp": 8.2563
+    },
+    {
+        "year": 2017,
+        "inflation": 4.0000,
+        "gdp": 6.7950
+    },
+    {
+        "year": 2018,
+        "inflation": 5.2400,
+        "gdp": 6.5330
+    },
+    {
+        "year": 2019,
+        "inflation": 9.6300,
+        "gdp": 4.0420
+    },
+    {
+        "year": 2020,
+        "inflation": 3.6900,
+        "gdp": -5.8000
+    },
+    {
+        "year": 2021,
+        "inflation": 5.5600,
+        "gdp": 9.7000
+    },
+    {
+        "year": 2022,
+        "inflation": 5.5000,
+        "gdp": 7.0000
+    },
+    {
+        "year": 2023,
+        "inflation": 4.9100,
+        "gdp": 8.2000
+    },
+    {
+        "year": 2024,
+        "inflation": 3.5300,
+        "gdp": 7.5000
+    },
+    {
+        "year": 2025,
+        "inflation": 4.5000,
+        "gdp": 7.5000
+    },
+    {
+        "year": 2026,
+        "inflation": 5.0000,
+        "gdp": 7.0000
+    }
+]
