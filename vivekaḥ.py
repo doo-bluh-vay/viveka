@@ -54,13 +54,15 @@ def log_function_call(func):
 
 
 # Constants
-VERSION = "1.0.0"
+VERSION = "0.0.2"
 NAV_API_URL = "https://portal.amfiindia.com/spages/NAVAll.txt"
 FUND_HOUSE_CONCENTRATION_LIMIT_PERCENT = 25
 NIFTY50_ISIN = 'INF179K01WM1'
 ISIN_FILE = "config/isin.db"
 GDP_DATA_FILE = "config/gdp_inflation_info.json"
 NIFTY50_DATA_FILE = "config/hdfc_nifty50_nav.json"
+XIRR_ASSET_TYPES = ['EQUITY','DEBT','GOLD']
+OPTIMUM_FUNDS = [5,2,2]
 
 os.environ["CASPARSER_ISIN_DB"] = ISIN_FILE
 
@@ -72,7 +74,78 @@ def is_float(value: str) -> bool:
     except ValueError:
         return False
 
+map_classified_funds = {}
 
+@log_function_call
+def classify_funds(cas_detailed_json):
+    cas_detailed_folios = cas_detailed_json["folios"]
+    for cas_detailed_folio in cas_detailed_folios:
+        cas_detailed_schemes = cas_detailed_folio["schemes"]
+        for cas_detailed_scheme in cas_detailed_schemes:
+            scheme_name = cas_detailed_scheme["scheme"] 
+            asset_type = cas_detailed_scheme["type"]
+            isin = cas_detailed_scheme["isin"]
+            if isin is not None:
+                if 'GOLD' in scheme_name.upper():
+                    map_classified_funds[isin] = {'ASSET_TYPE':'GOLD','DEFICIENT_DATA':False}
+                else:
+                    map_classified_funds[isin] = {'ASSET_TYPE':asset_type,'DEFICIENT_DATA':False}
+    
+def check_data_deficiency(cas_detailed_json_df):
+    print(Fore.GREEN + f"\r* {"DATA DEFICIENCY CHECK":40.40}\033[K", end="\n", flush=True)
+
+    data_deficiency_count = 0
+
+    for isin in cas_detailed_json_df['isin'].unique():
+        cas_detailed_json_df_isin = cas_detailed_json_df[cas_detailed_json_df['isin'] == isin]
+        if cas_detailed_json_df_isin.empty == False:
+            index = 0
+            row = cas_detailed_json_df_isin.iloc[index]
+            tx_units = float(row["units"])
+            tx_balance = float(row["balance"])
+            tx_type = row["type"]
+            tx_date = row["date"]
+            scheme_name = row["scheme_name"]
+            if not ( tx_type == "PURCHASE" or tx_type == "PURCHASE_SIP" or tx_type == "SWITCH_IN" or tx_type == 'SWITCH_IN_MERGER'):
+                print(Fore.RED + f"{' ':40.40}    '{scheme_name}' : FIRST ENTRY MUST BE A PURCHASE")
+                map_classified_funds[isin]['DEFICIENT_DATA'] = True
+                data_deficiency_count += 1
+                continue
+            elif tx_units != tx_balance:
+                print(Fore.RED + f"{' ':40.40}    '{scheme_name}' : INCORRECT STARTING BALANCE {tx_balance} ON DATE {tx_date}")
+                map_classified_funds[isin]['DEFICIENT_DATA'] = True
+                data_deficiency_count += 1
+                continue
+
+            old_tx_balance = tx_balance
+            index = 1
+            cas_detailed_json_df_isin = cas_detailed_json_df_isin.dropna(subset=["balance"])
+            while index < len(cas_detailed_json_df_isin):
+                row = cas_detailed_json_df_isin.iloc[index]
+                tx_type = row["type"]
+                valid_types = ["PURCHASE", "PURCHASE_SIP", "SWITCH_IN", 'SWITCH_IN_MERGER', "REDEMPTION", 'REVERSAL', 'SWITCH_OUT', 'GIFT_OUT', 'DIVIDEND_PAYOUT', 'DIVIDEND_REINVEST']
+                if tx_type in valid_types:
+                    tx_date = row["date"]
+                    tx_units = float(row["units"])
+                    tx_balance = float(row["balance"])
+                    list_of_balances = [tx_balance]
+                    total_units = tx_units
+                    while (index+1) < len(cas_detailed_json_df_isin) and cas_detailed_json_df_isin.iloc[index+1]["date"] == tx_date:
+                        list_of_balances.append(cas_detailed_json_df_isin.iloc[index+1]["balance"])
+                        total_units += cas_detailed_json_df_isin.iloc[index+1]["units"]
+                        index += 1
+                    new_balance = round(total_units + old_tx_balance,3)
+                    if new_balance not in list_of_balances:
+                        print(Fore.RED + f"{' ':40.40}    '{scheme_name}' : INCORRECT BALANCE {list_of_balances} ON DATE {tx_date}")
+                        map_classified_funds[isin]['DEFICIENT_DATA'] = True
+                        data_deficiency_count += 1
+                        break
+                    old_tx_balance = list_of_balances[-1]  # Update old_tx_balance to the last balance of the current date  
+                index += 1
+
+    if (data_deficiency_count == 0):
+        print(Fore.GREEN + f"\r* {" ":40.40}| CHECKS PASSED\033[K", end="\n", flush=True)
+    
 @log_function_call
 def parse_statement(pdf_file: Path, password: str) -> dict:
     if not pdf_file.is_file():
@@ -80,7 +153,6 @@ def parse_statement(pdf_file: Path, password: str) -> dict:
 
     json_str = casparser.read_cas_pdf(str(pdf_file), password, output="json")
     return json.loads(json_str)
-            
 
 @log_function_call
 def build_parser() -> argparse.ArgumentParser:
@@ -126,25 +198,27 @@ def add_statement_arguments(parser: argparse.ArgumentParser) -> None:
 @log_function_call
 def load_statement(cas_detailed_json: dict) -> pd.DataFrame:
     print(Fore.GREEN + f"\r* {"LOAD STATEMENT":40.40}\033[K", end="", flush=True)
-    columns = [
-        "isin",
-        "amfi_scheme_code",
-        "investor_name",
-        "date",
-        "amount",
-        "units",
-        "nav",
-        "balance",
-        "type"
-    ]    
-    transaction_rows = []
-    investor_name = cas_detailed_json["investor_info"]["name"]
-    cas_detailed_folios = cas_detailed_json["folios"]
-    for cas_detailed_folio in cas_detailed_folios:
-        cas_detailed_schemes = cas_detailed_folio["schemes"]
-        for cas_detailed_scheme in cas_detailed_schemes:
-            asset_type = cas_detailed_scheme["type"]
-            if asset_type == 'EQUITY':
+    try:
+        columns = [
+            "isin",
+            "scheme_name",
+            "investor_name",
+            "date",
+            "amount",
+            "units",
+            "nav",
+            "balance",
+            "type",
+            "asset_type"
+        ]    
+        transaction_rows = []
+        investor_name = cas_detailed_json["investor_info"]["name"]
+        cas_detailed_folios = cas_detailed_json["folios"]
+        for cas_detailed_folio in cas_detailed_folios:
+            cas_detailed_schemes = cas_detailed_folio["schemes"]
+            for cas_detailed_scheme in cas_detailed_schemes:
+                scheme_name = cas_detailed_scheme["scheme"] 
+                asset_type = cas_detailed_scheme["type"]
                 isin = cas_detailed_scheme["isin"]
                 amfi = cas_detailed_scheme["amfi"]
                 cas_detailed_transactions = cas_detailed_scheme["transactions"]
@@ -158,7 +232,7 @@ def load_statement(cas_detailed_json: dict) -> pd.DataFrame:
                     tx_nav = cas_detailed_transaction["nav"]
                     tx_balance = cas_detailed_transaction["balance"]
                     tx_type = cas_detailed_transaction["type"]
-                    if tx_type == "PURCHASE" or tx_type == "PURCHASE_SIP" or tx_type == "SWITCH_IN" or tx_type == 'SWITCH_IN_MERGER':
+                    if tx_type in ["PURCHASE","PURCHASE_SIP","SWITCH_IN",'SWITCH_IN_MERGER','DIVIDEND_REINVEST']:
                         tx_amount = float(tx_amount)
                         if next_cas_detailed_transaction is not None and next_cas_detailed_transaction["type"] == "STAMP_DUTY_TAX":
                             tx_amount = tx_amount + float(next_cas_detailed_transaction["amount"])
@@ -166,20 +240,21 @@ def load_statement(cas_detailed_json: dict) -> pd.DataFrame:
                         transaction_rows.append(
                                 [
                                     isin,
-                                    amfi,
+                                    scheme_name,
                                     investor_name,
                                     datetime.strptime(tx_date, "%Y-%m-%d").date(),
                                     tx_amount,
                                     tx_units,
                                     tx_nav,
                                     tx_balance,
-                                    "PURCHASE"
+                                    "PURCHASE",
+                                    asset_type
                                 ]
                             )                        
-                    elif tx_type == "REDEMPTION" or tx_type == 'REVERSAL' or tx_type == 'SWITCH_OUT' or tx_type == 'GIFT_OUT' or tx_type == 'DIVIDEND_PAYOUT':
+                    elif tx_type in ["REDEMPTION","REVERSAL","SWITCH_OUT",'GIFT_OUT','DIVIDEND_PAYOUT']:
                         tx_amount = float(tx_amount)
                         if tx_type == 'DIVIDEND_PAYOUT':
-                            tx_units = 0
+                            tx_units = tx_nav = tx_balance = 0
                         else:
                             tx_units = float(tx_units)    
                         if next_cas_detailed_transaction is not None and next_cas_detailed_transaction["type"] == "STT_TAX":
@@ -187,34 +262,40 @@ def load_statement(cas_detailed_json: dict) -> pd.DataFrame:
                         transaction_rows.append(
                             [
                                 isin,
-                                amfi,
+                                scheme_name,
                                 investor_name,
                                 datetime.strptime(tx_date, "%Y-%m-%d").date(),
                                 tx_amount,
                                 tx_units,
                                 tx_nav,
                                 tx_balance,
-                                "SELL"
+                                "SELL",
+                                asset_type
                             ]
                         )
                     elif tx_type == "STAMP_DUTY_TAX" or tx_type == 'STT_TAX' or tx_type == 'MISC':
                         pass
                     else:
                         print(Fore.RED + "Found a unsupported tx_type " + tx_type)
-    print(Fore.GREEN + f"\r* {"LOAD STATEMENT":40.40}| Total transactions = {len(transaction_rows)}\033[K", end="\n", flush=True)
-    temp_df = pd.DataFrame(transaction_rows, columns=columns)
-    temp_df = temp_df.astype({
-        "isin": "string",
-        "amfi_scheme_code": "string",
-        "investor_name": "string",
-        "date": "datetime64[ns]",
-        "amount": "float64",
-        "units": "float64",
-        "nav": "float64",
-        "balance": "float64",
-        "type": "string"        
-    })
-    return temp_df
+        print(Fore.GREEN + f"\r* {"LOAD STATEMENT":40.40}| Total transactions = {len(transaction_rows)}\033[K", end="\n", flush=True)
+        temp_df = pd.DataFrame(transaction_rows, columns=columns)
+        temp_df = temp_df.astype({
+            "isin": "string",
+            "scheme_name": "string",
+            "investor_name": "string",
+            "date": "datetime64[ns]",
+            "amount": "float64",
+            "units": "float64",
+            "nav": "float64",
+            "balance": "float64",
+            "type": "string"     ,
+            "asset_type": "string"   
+        })
+        return temp_df
+    except Exception as e:
+        logger.exception(f"EXCEPTION: {type(e).__name__}, {e.args}, {str(e)}")
+        print(Fore.RED + f"\r* {"LOAD STATEMENT":40.40}| Loading the Consolidated Statement Failed\033[K", end="\n", flush=True)
+        sys.exit(-1)
 
 @log_function_call
 def get_latest_nav_for_all_schemes() -> pd.DataFrame:
@@ -232,7 +313,12 @@ def get_latest_nav_for_all_schemes() -> pd.DataFrame:
         r = requests.get(NAV_API_URL, timeout = 20)
         split = r.text.split("\r\n")
         latest_fund_house_name = None
+        idx = 0
+        header = 'Scheme Code;ISIN Div Payout/ ISIN Growth;ISIN Div Reinvestment;Scheme Name;Plan;Option;Net Asset Value;Date'
         for line in split:
+            if idx == 0:
+                if header != line:
+                    raise Exception("NAV Data Header Mismatch")
             code = line.split(";")
             if code is not None and len(code) ==1 and code[0].endswith("Mutual Fund"):
                 latest_fund_house_name = code[0]
@@ -243,34 +329,50 @@ def get_latest_nav_for_all_schemes() -> pd.DataFrame:
                 schemeOption = code[5]
                 schemeNAV = code[6]    
                 nav_rows.append([schemeISIN, latest_fund_house_name, schemeName, schemePlan, schemeOption, schemeNAV])
+
+            idx+=1
         print(Fore.GREEN + f"\r* {"FETCHING NAV":40.40}| Total schemes = {len(nav_rows)}\033[K", end="\n", flush=True)
         return pd.DataFrame(nav_rows, columns=columns)
     except Exception as e:  
-        logger.exception("Exception occured:{}".format(e))
+        logger.exception(f"EXCEPTION: {type(e).__name__}, {e.args}, {str(e)}")
         print(Fore.RED + f"\r* {'MUTUAL FUND':40.40}| NAV Update failed\033[K", end="\n", flush=True)
         sys.exit(-1)
 
 @log_function_call
 def compute_full_xirr(cas_detailed_json, cas_detailed_json_df):
-    print(Fore.GREEN + f"\r* {"COMPUTE XIRR":40.40}\033[K", end="", flush=True)
+    print(Fore.GREEN + f"\r* {"COMPUTE XIRR (EXCL DEFICIENT DATA FUNDS)":40.40}\033[K", end="\n", flush=True)
 
-    cas_detailed_json_df_temp = cas_detailed_json_df[['date', 'amount']].copy()
+    try:
+        for xirr_asset_type in XIRR_ASSET_TYPES:
+            counter = 0
+            list_of_funds_with_data = []
+            for isin in map_classified_funds:
+                if  map_classified_funds[isin]['ASSET_TYPE'] == xirr_asset_type and map_classified_funds[isin]['DEFICIENT_DATA'] == False:
+                    list_of_funds_with_data.append(isin)
+            cas_detailed_json_df_copy = cas_detailed_json_df[['isin','date', 'amount']].copy()
+            cas_detailed_json_df_temp = cas_detailed_json_df_copy[cas_detailed_json_df_copy['isin'].isin(list_of_funds_with_data)].copy()
+            cas_detailed_folios = cas_detailed_json["folios"]
+            for cas_detailed_folio in cas_detailed_folios:
+                cas_detailed_schemes = cas_detailed_folio["schemes"]
+                for cas_detailed_scheme in cas_detailed_schemes:
+                    isin = cas_detailed_scheme["isin"]
+                    if isin in list_of_funds_with_data and len(cas_detailed_scheme["transactions"]) > 0:
+                        cas_summary_marketvalue = cas_detailed_scheme["valuation"]["value"]
+                        cas_summary_valudate = cas_detailed_scheme["valuation"]["date"]
+                        if float(cas_summary_marketvalue.replace(',','')) > 0 :
+                            new_row = {'isin': isin, 'date': pd.Timestamp(cas_summary_valudate), 'amount' : float(cas_summary_marketvalue.replace(',',''))*-1}
+                            cas_detailed_json_df_temp = pd.concat([cas_detailed_json_df_temp, pd.DataFrame([new_row])], ignore_index=True)                            
+                            counter += 1
 
-    counter = 0
-    cas_detailed_folios = cas_detailed_json["folios"]
-    for cas_detailed_folio in cas_detailed_folios:
-        cas_detailed_schemes = cas_detailed_folio["schemes"]
-        for cas_detailed_scheme in cas_detailed_schemes:
-            asset_type = cas_detailed_scheme["type"]
-            if asset_type == 'EQUITY':
-                cas_summary_marketvalue = cas_detailed_scheme["valuation"]["value"]
-                cas_summary_valudate = cas_detailed_scheme["valuation"]["date"]
-                cas_detailed_json_df_temp.loc[len(cas_detailed_json_df_temp)] = \
-                    [datetime.strptime(cas_summary_valudate, "%Y-%m-%d").date(), float(cas_summary_marketvalue.replace(',',''))*-1]
-                counter += 1
-
-    computed_xirr = round(xirr(cas_detailed_json_df_temp['date'].tolist(), cas_detailed_json_df_temp['amount'].tolist())*100,2)
-    print(Fore.GREEN + f"\r* {"COMPUTE XIRR":40.40}| XIRR = {computed_xirr}\033[K", end="\n", flush=True)
+            if counter > 0 :
+                computed_xirr = round(xirr(cas_detailed_json_df_temp['date'].tolist(), cas_detailed_json_df_temp['amount'].tolist())*100,2)
+                print(Fore.GREEN + f"\r  {" ":40.40}| {xirr_asset_type:10.10} XIRR = {computed_xirr}\033[K", end="\n", flush=True)
+            else:
+                print(Fore.GREEN + f"\r  {" ":40.40}| {xirr_asset_type:10.10} XIRR = No Funds Found\033[K", end="\n", flush=True)
+    except Exception as e:  
+        logger.exception(f"EXCEPTION: {type(e).__name__}, {e.args}, {str(e)}")
+        print(Fore.GREEN + f"\r  {"COMPUTE XIRR":40.40}| XIRR Computation Failed\033[K", end="\n", flush=True)
+        sys.exit(-1)        
 
 @log_function_call
 def compute_schemewise_xirr(cas_detailed_json, cas_detailed_json_df):
@@ -283,20 +385,24 @@ def compute_schemewise_xirr(cas_detailed_json, cas_detailed_json_df):
     for cas_detailed_folio in cas_detailed_folios:
         cas_detailed_schemes = cas_detailed_folio["schemes"]
         for cas_detailed_scheme in cas_detailed_schemes:
-            asset_type = cas_detailed_scheme["type"]
             isin = cas_detailed_scheme["isin"]
             scheme = cas_detailed_scheme["scheme"]
-            if asset_type == 'EQUITY':
-                cas_summary_marketvalue = cas_detailed_scheme["valuation"]["value"]
-                cas_summary_valudate = cas_detailed_scheme["valuation"]["date"]
-                market_value = float(cas_summary_marketvalue.replace(',',''))
-                market_date = datetime.strptime(cas_summary_valudate, "%Y-%m-%d").date()
-                if market_value > 0:
-                    cas_detailed_json_df_scheme = cas_detailed_json_df_scheme_all[cas_detailed_json_df_scheme_all['isin'] == isin].copy()                    
-                    cas_detailed_json_df_scheme.loc[len(cas_detailed_json_df_scheme)] = \
-                        [isin, pd.Timestamp(market_date) , float(market_value)*-1]
-                    computed_xirr = round(xirr(cas_detailed_json_df_scheme['date'].tolist(), cas_detailed_json_df_scheme['amount'].tolist())*100,2)
-                    print(Fore.GREEN + f"  {' ':40.40}| Scheme {scheme:60.60}| XIRR = {computed_xirr}")
+            if isin is None:
+                continue
+            if map_classified_funds[isin]['DEFICIENT_DATA'] == True:
+                print(Fore.RED + f"  {' ':40.40}| {scheme:60.60}| DEFICIENT DATA")
+            else:
+                if len(cas_detailed_scheme["transactions"]) > 0:
+                    cas_summary_marketvalue = cas_detailed_scheme["valuation"]["value"]
+                    cas_summary_valudate = cas_detailed_scheme["valuation"]["date"]
+                    market_value = float(cas_summary_marketvalue.replace(',',''))
+                    market_date = datetime.strptime(cas_summary_valudate, "%Y-%m-%d").date()
+                    if market_value > 0:
+                        cas_detailed_json_df_scheme = cas_detailed_json_df_scheme_all[cas_detailed_json_df_scheme_all['isin'] == isin].copy()                    
+                        cas_detailed_json_df_scheme.loc[len(cas_detailed_json_df_scheme)] = \
+                            [isin, pd.Timestamp(market_date) , float(market_value)*-1]
+                        computed_xirr = round(xirr(cas_detailed_json_df_scheme['date'].tolist(), cas_detailed_json_df_scheme['amount'].tolist())*100,2)
+                        print(Fore.GREEN + f"  {' ':40.40}| {scheme:60.60}| XIRR = {computed_xirr}")
 
 @log_function_call
 def search_for_regular_plans(cas_detailed_json, schemewise_latest_nav):
@@ -306,13 +412,12 @@ def search_for_regular_plans(cas_detailed_json, schemewise_latest_nav):
     for cas_detailed_folio in cas_detailed_folios:
         cas_detailed_schemes = cas_detailed_folio["schemes"]
         for cas_detailed_scheme in cas_detailed_schemes:
-            asset_type = cas_detailed_scheme["type"]
             isin = cas_detailed_scheme["isin"]
-            if asset_type == 'EQUITY':
-                cas_summary_marketvalue = cas_detailed_scheme["valuation"]["value"]
-                market_value = float(cas_summary_marketvalue.replace(',',''))
-                if market_value > 0:
-                    amfi_scheme_plan = schemewise_latest_nav[schemewise_latest_nav['isin'] == isin]['plan'].values[0] if len(schemewise_latest_nav[schemewise_latest_nav['isin'] == isin]) > 0 else None
+            cas_summary_marketvalue = cas_detailed_scheme["valuation"]["value"]
+            market_value = float(cas_summary_marketvalue.replace(',',''))
+            if market_value > 0:
+                amfi_scheme_plan = schemewise_latest_nav[schemewise_latest_nav['isin'] == isin]['plan'].values[0] if len(schemewise_latest_nav[schemewise_latest_nav['isin'] == isin]) > 0 else None
+                if amfi_scheme_plan is not None:
                     isRegular = True
                     if amfi_scheme_plan.upper() == "DIRECT PLAN":
                             isRegular = False
@@ -332,16 +437,13 @@ def check_dividend_plan_funds(cas_detailed_json, schemewise_latest_nav):
     for cas_detailed_folio in cas_detailed_folios:
         cas_detailed_schemes = cas_detailed_folio["schemes"]
         for cas_detailed_scheme in cas_detailed_schemes:
-            asset_type = cas_detailed_scheme["type"]
             isin = cas_detailed_scheme["isin"]
-
-            if asset_type == 'EQUITY':
-                cas_summary_marketvalue = cas_detailed_scheme["valuation"]["value"]
-                market_value = float(cas_summary_marketvalue.replace(',',''))
-                if market_value > 0:
-                    amfi_scheme_option = schemewise_latest_nav[schemewise_latest_nav['isin'] == isin]['option'].values[0] if len(schemewise_latest_nav[schemewise_latest_nav['isin'] == isin]) > 0 else None
-                    if not amfi_scheme_option.upper().startswith("GROWTH"):
-                        count += 1
+            cas_summary_marketvalue = cas_detailed_scheme["valuation"]["value"]
+            market_value = float(cas_summary_marketvalue.replace(',',''))
+            if market_value > 0:
+                amfi_scheme_option = schemewise_latest_nav[schemewise_latest_nav['isin'] == isin]['option'].values[0] if len(schemewise_latest_nav[schemewise_latest_nav['isin'] == isin]) > 0 else None
+                if amfi_scheme_option is not None and (not amfi_scheme_option.upper().startswith("GROWTH")):
+                    count += 1
 
     if count == 0:
         print(Fore.GREEN + f"\r* {"FUND PLAN TYPE":40.40}| GOOD - No Dividend Plans\033[K", end="\n", flush=True)
@@ -350,24 +452,31 @@ def check_dividend_plan_funds(cas_detailed_json, schemewise_latest_nav):
 
 @log_function_call
 def check_optimum_funds(cas_detailed_json):
-    print(Fore.GREEN + f"\r* {"FUND COUNT":40.40}\033[K", end="", flush=True)
-    count = 0
+    print(Fore.GREEN + f"\r* {"FUND COUNT":40.40}\033[K", end="\n", flush=True)
+    optimum_funds_counter = [0]  * len(XIRR_ASSET_TYPES)
     cas_detailed_folios = cas_detailed_json["folios"]
     for cas_detailed_folio in cas_detailed_folios:
         cas_detailed_schemes = cas_detailed_folio["schemes"]
         for cas_detailed_scheme in cas_detailed_schemes:
-            asset_type = cas_detailed_scheme["type"]
-            scheme = cas_detailed_scheme["scheme"]
-            if asset_type == 'EQUITY':
+            isin =  cas_detailed_scheme["isin"]
+            if isin is not None:
+                fund_asset_type = map_classified_funds[isin]["ASSET_TYPE"]
+                idx = XIRR_ASSET_TYPES.index(fund_asset_type)
                 cas_summary_marketvalue = cas_detailed_scheme["valuation"]["value"]
                 market_value = float(cas_summary_marketvalue.replace(',',''))
                 if market_value > 0:
-                    count += 1
+                    optimum_funds_counter[idx] += 1
 
-    if count <= 6:
-        print(Fore.GREEN + f"\r* {"FUND COUNT":40.40}| GOOD - Optimum 5-6 Funds in Equity portfolio\033[K", end="\n", flush=True)
-    else:
-        print(Fore.YELLOW + f"\r* {"FUND COUNT":40.40}| {count} Funds in Equity portfolio. Consider reducing the total number of funds to 5-6 \033[K", end="\n", flush=True)
+    idx = 0
+    while idx < len(XIRR_ASSET_TYPES):
+        counter = optimum_funds_counter[idx]
+        xirr_asset_type = XIRR_ASSET_TYPES[idx]
+        optimum_value = OPTIMUM_FUNDS[idx]
+        if counter <= optimum_value:
+            print(Fore.GREEN + f"\r* {" ":40.40}| GOOD - Optimum {optimum_value} Funds in {xirr_asset_type} portfolio\033[K", end="\n", flush=True)
+        else:
+            print(Fore.YELLOW + f"\r* {" ":40.40}| {counter} Funds in {xirr_asset_type} portfolio. Consider reducing the total number of funds to {optimum_value} \033[K", end="\n", flush=True)
+        idx += 1
 
 @log_function_call    
 def check_fund_house_concentration(cas_detailed_json, schemewise_latest_nav):
@@ -378,19 +487,16 @@ def check_fund_house_concentration(cas_detailed_json, schemewise_latest_nav):
     for cas_detailed_folio in cas_detailed_folios:
         cas_detailed_schemes = cas_detailed_folio["schemes"]
         for cas_detailed_scheme in cas_detailed_schemes:
-            asset_type = cas_detailed_scheme["type"]
             isin = cas_detailed_scheme["isin"]
-
-            if asset_type == 'EQUITY':
-                cas_summary_marketvalue = cas_detailed_scheme["valuation"]["value"]
-                market_value = float(cas_summary_marketvalue.replace(',',''))
-                if market_value > 0:
-                    amfi_scheme_fund_house = schemewise_latest_nav[schemewise_latest_nav['isin'] == isin]['fund_house'].values[0] if len(schemewise_latest_nav[schemewise_latest_nav['isin'] == isin]) > 0 else None
-                    if amfi_scheme_fund_house in map_of_fund_house_to_market_value:
-                        map_of_fund_house_to_market_value[amfi_scheme_fund_house] += market_value
-                    else:
-                        map_of_fund_house_to_market_value[amfi_scheme_fund_house] = market_value
-                    total_market_value += market_value
+            cas_summary_marketvalue = cas_detailed_scheme["valuation"]["value"]
+            market_value = float(cas_summary_marketvalue.replace(',',''))
+            if market_value > 0:
+                amfi_scheme_fund_house = schemewise_latest_nav[schemewise_latest_nav['isin'] == isin]['fund_house'].values[0] if len(schemewise_latest_nav[schemewise_latest_nav['isin'] == isin]) > 0 else None
+                if amfi_scheme_fund_house in map_of_fund_house_to_market_value:
+                    map_of_fund_house_to_market_value[amfi_scheme_fund_house] += market_value
+                else:
+                    map_of_fund_house_to_market_value[amfi_scheme_fund_house] = market_value
+                total_market_value += market_value
     fund_houses_concentration_list = []
     for fund_house, market_value in map_of_fund_house_to_market_value.items():
         if (market_value / total_market_value) > (FUND_HOUSE_CONCENTRATION_LIMIT_PERCENT/100):
@@ -405,19 +511,32 @@ def check_fund_house_concentration(cas_detailed_json, schemewise_latest_nav):
 def compare_with_index(cas_detailed_json, statement_df, schemewise_latest_nav):
     print(Fore.GREEN + f"\r* {"INDEX COMPARISON":40.40}\033[K", end="\n", flush=True)
 
+    list_of_funds_with_data = []
+    for isin in map_classified_funds:
+        if  map_classified_funds[isin]['ASSET_TYPE'] == 'EQUITY' and map_classified_funds[isin]['DEFICIENT_DATA'] == False:
+            list_of_funds_with_data.append(isin)
+            
     # Get Current Valuation
     total_market_value = 0
+    total_invested_amount = 0
     cas_detailed_folios = cas_detailed_json["folios"]
     for cas_detailed_folio in cas_detailed_folios:
         cas_detailed_schemes = cas_detailed_folio["schemes"]
         for cas_detailed_scheme in cas_detailed_schemes:
+            isin = cas_detailed_scheme["isin"]
             asset_type = cas_detailed_scheme["type"]
-            if asset_type == 'EQUITY':
+            if isin is not None and isin in list_of_funds_with_data and len(cas_detailed_scheme["transactions"]) > 0:
                 cas_summary_marketvalue = cas_detailed_scheme["valuation"]["value"]
                 market_value = float(cas_summary_marketvalue.replace(',',''))
                 total_market_value += market_value 
-    print(Fore.GREEN + f"  {' ':40.40}| Total Market Value     = {round(total_market_value,0)}")   
-    print(Fore.GREEN + f"  {' ':40.40}| Total Invested Amount  = {round(statement_df['amount'].sum(),0)}")   
+                cas_detailed_transactions = cas_detailed_scheme["transactions"]
+                for cas_detailed_transaction in cas_detailed_transactions:
+                    tx_amount = cas_detailed_transaction["amount"]
+                    if tx_amount is not None:
+                        total_invested_amount += float(tx_amount)
+
+    print(Fore.GREEN + f"  {' ':40.40}| Total EQUITY Market Value     = {round(total_market_value,0)}")   
+    print(Fore.GREEN + f"  {' ':40.40}| Total EQUITY Invested Amount  = {round(total_invested_amount,0)}")   
 
     # Load the GDP Inflation Information
     df_gdp_inflation_info = pd.read_json(GDP_DATA_FILE)
@@ -436,6 +555,8 @@ def compare_with_index(cas_detailed_json, statement_df, schemewise_latest_nav):
     # Fill Contribution amount
     nifty50_units_sum = 0.0
     for row in statement_df.itertuples():
+        if row.isin is None or pd.isna(row.isin) or row.isin not in list_of_funds_with_data:
+            continue
         contributiondate = row.date
         contributionamount = row.amount
         year = contributiondate.year if hasattr(contributiondate, 'year') else int(str(contributiondate)[:4])
@@ -469,7 +590,9 @@ def compare_with_index(cas_detailed_json, statement_df, schemewise_latest_nav):
 @log_function_call
 def provide_insights(statement: dict) -> None:
     statement_df = load_statement(statement)
+    classify_funds(statement)
     schemewise_latest_nav = get_latest_nav_for_all_schemes()
+    check_data_deficiency(statement_df)
     compute_full_xirr(statement, statement_df)
     compute_schemewise_xirr(statement, statement_df)
     search_for_regular_plans(statement, schemewise_latest_nav)
