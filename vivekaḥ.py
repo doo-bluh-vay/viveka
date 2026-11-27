@@ -54,13 +54,17 @@ def log_function_call(func):
 
 
 # Constants
-VERSION = "0.0.2"
+VERSION = "0.0.3"
 NAV_API_URL = "https://portal.amfiindia.com/spages/NAVAll.txt"
 FUND_HOUSE_CONCENTRATION_LIMIT_PERCENT = 25
 NIFTY50_ISIN = 'INF179K01WM1'
+FLEXICAP1_ISIN = 'INF179K01UT0'
+FLEXICAP2_ISIN = 'INF090I01FK3'
 ISIN_FILE = "config/isin.db"
 GDP_DATA_FILE = "config/gdp_inflation_info.json"
 NIFTY50_DATA_FILE = "config/hdfc_nifty50_nav.json"
+FLEXICAP1_DATA_FILE = "config/hdfc_flexicap_nav.json"
+FLEXICAP2_DATA_FILE = "config/franklintempleton_flexicap_nav.json"
 XIRR_ASSET_TYPES = ['EQUITY','DEBT','GOLD']
 OPTIMUM_FUNDS = [5,2,2]
 
@@ -97,52 +101,63 @@ def check_data_deficiency(cas_detailed_json_df):
     data_deficiency_count = 0
 
     for isin in cas_detailed_json_df['isin'].unique():
-        cas_detailed_json_df_isin = cas_detailed_json_df[cas_detailed_json_df['isin'] == isin]
-        if cas_detailed_json_df_isin.empty == False:
-            index = 0
-            row = cas_detailed_json_df_isin.iloc[index]
-            tx_units = float(row["units"])
-            tx_balance = float(row["balance"])
-            tx_type = row["type"]
-            tx_date = row["date"]
-            scheme_name = row["scheme_name"]
-            if not ( tx_type == "PURCHASE" or tx_type == "PURCHASE_SIP" or tx_type == "SWITCH_IN" or tx_type == 'SWITCH_IN_MERGER'):
-                print(Fore.RED + f"{' ':40.40}    '{scheme_name}' : FIRST ENTRY MUST BE A PURCHASE")
-                map_classified_funds[isin]['DEFICIENT_DATA'] = True
-                data_deficiency_count += 1
+        if isin is not None:
+            cas_detailed_json_df_isin = cas_detailed_json_df[cas_detailed_json_df['isin'] == isin].copy()
+            if cas_detailed_json_df_isin.empty == True:
                 continue
-            elif tx_units != tx_balance:
-                print(Fore.RED + f"{' ':40.40}    '{scheme_name}' : INCORRECT STARTING BALANCE {tx_balance} ON DATE {tx_date}")
-                map_classified_funds[isin]['DEFICIENT_DATA'] = True
-                data_deficiency_count += 1
-                continue
-
-            old_tx_balance = tx_balance
-            index = 1
-            cas_detailed_json_df_isin = cas_detailed_json_df_isin.dropna(subset=["balance"])
-            while index < len(cas_detailed_json_df_isin):
-                row = cas_detailed_json_df_isin.iloc[index]
-                tx_type = row["type"]
-                valid_types = ["PURCHASE", "PURCHASE_SIP", "SWITCH_IN", 'SWITCH_IN_MERGER', "REDEMPTION", 'REVERSAL', 'SWITCH_OUT', 'GIFT_OUT', 'DIVIDEND_PAYOUT', 'DIVIDEND_REINVEST']
-                if tx_type in valid_types:
-                    tx_date = row["date"]
-                    tx_units = float(row["units"])
-                    tx_balance = float(row["balance"])
-                    list_of_balances = [tx_balance]
-                    total_units = tx_units
-                    while (index+1) < len(cas_detailed_json_df_isin) and cas_detailed_json_df_isin.iloc[index+1]["date"] == tx_date:
-                        list_of_balances.append(cas_detailed_json_df_isin.iloc[index+1]["balance"])
-                        total_units += cas_detailed_json_df_isin.iloc[index+1]["units"]
-                        index += 1
-                    new_balance = round(total_units + old_tx_balance,3)
-                    if new_balance not in list_of_balances:
-                        print(Fore.RED + f"{' ':40.40}    '{scheme_name}' : INCORRECT BALANCE {list_of_balances} ON DATE {tx_date}")
-                        map_classified_funds[isin]['DEFICIENT_DATA'] = True
-                        data_deficiency_count += 1
-                        break
-                    old_tx_balance = list_of_balances[-1]  # Update old_tx_balance to the last balance of the current date  
-                index += 1
-
+            cas_detailed_json_df_isin_sorted = cas_detailed_json_df_isin.sort_values(by='date').copy()
+            cas_detailed_json_df_isin_sorted = cas_detailed_json_df_isin_sorted[~(cas_detailed_json_df_isin_sorted['type'] == 'DIVIDEND_PAYOUT')]
+            scheme_name = cas_detailed_json_df_isin_sorted.at[cas_detailed_json_df_isin_sorted.index[0], 'scheme_name']
+            transaction_rows = []
+            for tx_date in cas_detailed_json_df_isin_sorted['date'].unique():
+                cas_detailed_json_df_isin_date = cas_detailed_json_df_isin_sorted[cas_detailed_json_df_isin_sorted['date'] == tx_date].copy()
+                total_units = 0
+                list_balances = []
+                list_types = []
+                for row in cas_detailed_json_df_isin_date.itertuples():
+                    tx_type = row.type
+                    total_units += row.units
+                    list_balances.append(row.balance)
+                    list_types.append(tx_type)
+                transaction_rows.append(
+                        [
+                            tx_date,
+                            total_units,
+                            list_balances,
+                            list_types
+                        ]
+                    )           
+            if len(transaction_rows) > 0:             
+                idx = 0
+                old_tx_balance = 0
+                while idx < len(transaction_rows):
+                    tx_date = transaction_rows[idx][0]
+                    total_units = transaction_rows[idx][1]
+                    list_of_balances = transaction_rows[idx][2]
+                    list_of_types = transaction_rows[idx][3]
+                    if idx == 0:
+                        if not ( any(item in ["PURCHASE","PURCHASE_SIP","SWITCH_IN",'SWITCH_IN_MERGER'] for item in list_of_types)):
+                            print(Fore.RED + f"{' ':40.40}    '{scheme_name}' : FIRST ENTRY MUST BE A PURCHASE")
+                            map_classified_funds[isin]['DEFICIENT_DATA'] = True
+                            data_deficiency_count += 1
+                            break
+                        elif total_units not in list_of_balances:
+                            print(Fore.RED + f"{' ':40.40}    '{scheme_name}' : INCORRECT STARTING BALANCE {list_of_balances} ON DATE {tx_date}")
+                            map_classified_funds[isin]['DEFICIENT_DATA'] = True
+                            data_deficiency_count += 1
+                            break                
+                        old_tx_balance = max(list_of_balances)
+                    else:
+                        new_balance = round(total_units + old_tx_balance,3)                        
+                        if new_balance not in list_of_balances:
+                            print(total_units)
+                            print(Fore.RED + f"{' ':40.40}    '{scheme_name}' : INCORRECT BALANCE {list_of_balances} EXPECTED {new_balance} ON DATE {tx_date}")
+                            map_classified_funds[isin]['DEFICIENT_DATA'] = True
+                            data_deficiency_count += 1
+                            break
+                        old_tx_balance = new_balance  
+                    idx += 1
+ 
     if (data_deficiency_count == 0):
         print(Fore.GREEN + f"\r* {" ":40.40}| CHECKS PASSED\033[K", end="\n", flush=True)
     
@@ -199,18 +214,6 @@ def add_statement_arguments(parser: argparse.ArgumentParser) -> None:
 def load_statement(cas_detailed_json: dict) -> pd.DataFrame:
     print(Fore.GREEN + f"\r* {"LOAD STATEMENT":40.40}\033[K", end="", flush=True)
     try:
-        columns = [
-            "isin",
-            "scheme_name",
-            "investor_name",
-            "date",
-            "amount",
-            "units",
-            "nav",
-            "balance",
-            "type",
-            "asset_type"
-        ]    
         transaction_rows = []
         investor_name = cas_detailed_json["investor_info"]["name"]
         cas_detailed_folios = cas_detailed_json["folios"]
@@ -220,7 +223,6 @@ def load_statement(cas_detailed_json: dict) -> pd.DataFrame:
                 scheme_name = cas_detailed_scheme["scheme"] 
                 asset_type = cas_detailed_scheme["type"]
                 isin = cas_detailed_scheme["isin"]
-                amfi = cas_detailed_scheme["amfi"]
                 cas_detailed_transactions = cas_detailed_scheme["transactions"]
                 for index, cas_detailed_transaction in enumerate(cas_detailed_transactions):
                     next_cas_detailed_transaction = None
@@ -232,7 +234,7 @@ def load_statement(cas_detailed_json: dict) -> pd.DataFrame:
                     tx_nav = cas_detailed_transaction["nav"]
                     tx_balance = cas_detailed_transaction["balance"]
                     tx_type = cas_detailed_transaction["type"]
-                    if tx_type in ["PURCHASE","PURCHASE_SIP","SWITCH_IN",'SWITCH_IN_MERGER','DIVIDEND_REINVEST']:
+                    if tx_type in ["PURCHASE","PURCHASE_SIP","SWITCH_IN",'SWITCH_IN_MERGER','DIVIDEND_REINVEST','GIFT_IN']:
                         tx_amount = float(tx_amount)
                         if next_cas_detailed_transaction is not None and next_cas_detailed_transaction["type"] == "STAMP_DUTY_TAX":
                             tx_amount = tx_amount + float(next_cas_detailed_transaction["amount"])
@@ -247,11 +249,11 @@ def load_statement(cas_detailed_json: dict) -> pd.DataFrame:
                                     tx_units,
                                     tx_nav,
                                     tx_balance,
-                                    "PURCHASE",
+                                    tx_type,
                                     asset_type
                                 ]
                             )                        
-                    elif tx_type in ["REDEMPTION","REVERSAL","SWITCH_OUT",'GIFT_OUT','DIVIDEND_PAYOUT']:
+                    elif tx_type in ["REDEMPTION","REVERSAL","SWITCH_OUT",'SWITCH_OUT_MERGER','GIFT_OUT','DIVIDEND_PAYOUT']:
                         tx_amount = float(tx_amount)
                         if tx_type == 'DIVIDEND_PAYOUT':
                             tx_units = tx_nav = tx_balance = 0
@@ -269,17 +271,16 @@ def load_statement(cas_detailed_json: dict) -> pd.DataFrame:
                                 tx_units,
                                 tx_nav,
                                 tx_balance,
-                                "SELL",
+                                tx_type,
                                 asset_type
                             ]
                         )
-                    elif tx_type == "STAMP_DUTY_TAX" or tx_type == 'STT_TAX' or tx_type == 'MISC':
+                    elif tx_type == "STAMP_DUTY_TAX" or tx_type == 'STT_TAX' or tx_type == 'MISC' or tx_type == 'TDS_TAX':
                         pass
                     else:
                         print(Fore.RED + "Found a unsupported tx_type " + tx_type)
         print(Fore.GREEN + f"\r* {"LOAD STATEMENT":40.40}| Total transactions = {len(transaction_rows)}\033[K", end="\n", flush=True)
-        temp_df = pd.DataFrame(transaction_rows, columns=columns)
-        temp_df = temp_df.astype({
+        column_info = {
             "isin": "string",
             "scheme_name": "string",
             "investor_name": "string",
@@ -290,7 +291,9 @@ def load_statement(cas_detailed_json: dict) -> pd.DataFrame:
             "balance": "float64",
             "type": "string"     ,
             "asset_type": "string"   
-        })
+        }        
+        temp_df = pd.DataFrame(transaction_rows, columns=list(column_info.keys()))
+        temp_df = temp_df.astype(column_info)
         return temp_df
     except Exception as e:
         logger.exception(f"EXCEPTION: {type(e).__name__}, {e.args}, {str(e)}")
@@ -524,7 +527,6 @@ def compare_with_index(cas_detailed_json, statement_df, schemewise_latest_nav):
         cas_detailed_schemes = cas_detailed_folio["schemes"]
         for cas_detailed_scheme in cas_detailed_schemes:
             isin = cas_detailed_scheme["isin"]
-            asset_type = cas_detailed_scheme["type"]
             if isin is not None and isin in list_of_funds_with_data and len(cas_detailed_scheme["transactions"]) > 0:
                 cas_summary_marketvalue = cas_detailed_scheme["valuation"]["value"]
                 market_value = float(cas_summary_marketvalue.replace(',',''))
@@ -542,6 +544,10 @@ def compare_with_index(cas_detailed_json, statement_df, schemewise_latest_nav):
     df_gdp_inflation_info = pd.read_json(GDP_DATA_FILE)
     df_nifty50_info = pd.read_json(NIFTY50_DATA_FILE, dtype=False, convert_dates=False)
     df_nifty50_info["date"] = pd.to_datetime(df_nifty50_info["date"], format="%d-%m-%Y")
+    df_flexicap1_info = pd.read_json(FLEXICAP1_DATA_FILE, dtype=False, convert_dates=False)
+    df_flexicap1_info["date"] = pd.to_datetime(df_flexicap1_info["date"], format="%d-%m-%Y")
+    df_flexicap2_info = pd.read_json(FLEXICAP2_DATA_FILE, dtype=False, convert_dates=False)
+    df_flexicap2_info["date"] = pd.to_datetime(df_flexicap2_info["date"], format="%d-%m-%Y")
 
     df_gdp_inflation_info_sorted = df_gdp_inflation_info.sort_values(by="year", ascending=False)
     df_gdp_inflation_info_sorted['total_value'] = 0.0
@@ -554,6 +560,8 @@ def compare_with_index(cas_detailed_json, statement_df, schemewise_latest_nav):
 
     # Fill Contribution amount
     nifty50_units_sum = 0.0
+    flexicap1_units_sum = 0.0
+    flexicap2_units_sum = 0.0
     for row in statement_df.itertuples():
         if row.isin is None or pd.isna(row.isin) or row.isin not in list_of_funds_with_data:
             continue
@@ -578,9 +586,49 @@ def compare_with_index(cas_detailed_json, statement_df, schemewise_latest_nav):
                     break
         else:
             nifty50_units_sum += contributionamount/(float(nifty50_nav.iloc[0].nav))
+        flexicap1_nav = df_flexicap1_info[df_flexicap1_info['date'] == contributiondate.strftime("%Y-%m-%d")]
+        if flexicap1_nav.empty:
+            window = 5  # Number of days before and after
+            nearby_dates = [
+                contributiondate + timedelta(days=i) 
+                for i in range(-window, window + 1)
+            ]
+
+            for nearby_date in nearby_dates:            
+                flexicap1_nav_nearby = df_flexicap1_info[df_flexicap1_info['date'] == nearby_date.strftime("%Y-%m-%d")]
+                if flexicap1_nav_nearby.empty:
+                    continue
+                else:
+                    flexicap1_units_sum += contributionamount/(float(flexicap1_nav_nearby.iloc[0].nav))
+                    break
+        else:
+            flexicap1_units_sum += contributionamount/(float(flexicap1_nav.iloc[0].nav))
+        flexicap2_nav = df_flexicap2_info[df_flexicap2_info['date'] == contributiondate.strftime("%Y-%m-%d")]
+        if flexicap2_nav.empty:
+            window = 5  # Number of days before and after
+            nearby_dates = [
+                contributiondate + timedelta(days=i) 
+                for i in range(-window, window + 1)
+            ]
+
+            for nearby_date in nearby_dates:            
+                flexicap2_nav_nearby = df_flexicap2_info[df_flexicap2_info['date'] == nearby_date.strftime("%Y-%m-%d")]
+                if flexicap2_nav_nearby.empty:
+                    continue
+                else:
+                    flexicap2_units_sum += contributionamount/(float(flexicap2_nav_nearby.iloc[0].nav))
+                    break
+        else:
+            flexicap2_units_sum += contributionamount/(float(flexicap2_nav.iloc[0].nav))
     nifty50_nav = schemewise_latest_nav[schemewise_latest_nav['isin'] == NIFTY50_ISIN]['nav'].values[0] if len(schemewise_latest_nav[schemewise_latest_nav['isin'] == NIFTY50_ISIN]) > 0 else 0
     nifty50_corpus = float(nifty50_nav) * nifty50_units_sum
     print(Fore.GREEN + f"  {' ':40.40}| Total NIFTY 50 Indexed Amount   = {round(nifty50_corpus,0)}")   
+    flexicap1_nav = schemewise_latest_nav[schemewise_latest_nav['isin'] == FLEXICAP1_ISIN]['nav'].values[0] if len(schemewise_latest_nav[schemewise_latest_nav['isin'] == FLEXICAP1_ISIN]) > 0 else 0
+    flexicap1_corpus = float(flexicap1_nav) * flexicap1_units_sum
+    print(Fore.GREEN + f"  {' ':40.40}| Total FLEXI CAP 1 Indexed Amount   = {round(flexicap1_corpus,0)}")   
+    flexicap2_nav = schemewise_latest_nav[schemewise_latest_nav['isin'] == FLEXICAP2_ISIN]['nav'].values[0] if len(schemewise_latest_nav[schemewise_latest_nav['isin'] == FLEXICAP2_ISIN]) > 0 else 0
+    flexicap2_corpus = float(flexicap2_nav) * flexicap2_units_sum
+    print(Fore.GREEN + f"  {' ':40.40}| Total FLEXI CAP 2 Indexed Amount   = {round(flexicap2_corpus,0)}")   
 
     total_indexed_amount = 0.0
     for row in df_gdp_inflation_info_sorted.itertuples():
@@ -638,17 +686,18 @@ def main(argv: list[str] | None = None) -> int:
         print("Version = " + VERSION)
         return 0
 
-    password = args.password
-    if password is None:
-        password = getpass.getpass("PDF password: ")
-
-    try:
-        statement = parse_statement(args.pdf, password)
-        if args.action == "list":
+    if args.action == "list":
+        password = args.password
+        if password is None:
+            password = getpass.getpass("PDF password: ")
+        try:
+            statement = parse_statement(args.pdf, password)
             provide_insights(statement)
-    except (FileNotFoundError, OSError, subprocess.CalledProcessError, ValueError, RuntimeError) as error:
-        print(Fore.RED + f"ERROR: {error}", file=sys.stderr)
-        return 1
+        except (FileNotFoundError, OSError, subprocess.CalledProcessError, ValueError, RuntimeError) as error:
+            print(Fore.RED + f"ERROR: {error}", file=sys.stderr)
+            return 1
+        return 0
+
     return 0
 
 
